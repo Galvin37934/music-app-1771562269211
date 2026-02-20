@@ -1,0 +1,34 @@
+name: Build Android APK
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build with Cordova
+        run: |
+          npm install -g cordova
+          cordova create myapp com.hanz.music "APK Builder by Rez"
+          cd myapp
+          cordova platform add android
+          rm -rf www/*
+          cp ../index.html www/
+          cordova build android --debug --device
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: myapp/platforms/android/app/build/outputs/apk/debug/app-debug.apk
