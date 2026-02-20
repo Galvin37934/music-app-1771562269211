@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APK Automator v4 - With Icon Support</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { background-color: #0d1117; color: #c9d1d9; font-family: sans-serif; }
+        .glass { background: #161b22; border: 1px solid #30363d; }
+        .loader { border-top-color: #3b82f6; animation: spinner 1.5s linear infinite; }
+        @keyframes spinner { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function App() {
+            const [step, setStep] = useState(1);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [repoUrl, setRepoUrl] = useState('');
+            
+            // Auto-save Config
+            const [auth, setAuth] = useState(() => {
+                const saved = localStorage.getItem('apk_auth');
+                return saved ? JSON.parse(saved) : { user: '', token: '' };
+            });
+
+            const [appInfo, setAppInfo] = useState({ name: 'My App', package: 'com.rez.app' });
+            const [htmlFile, setHtmlFile] = useState(null);
+            const [iconFile, setIconFile] = useState(null);
+
+            useEffect(() => {
+                localStorage.setItem('apk_auth', JSON.stringify(auth));
+            }, [auth]);
+
+            const handleFile = (e, setter) => {
+                const file = e.target.files[0];
+                if (file) setter(file);
+            };
+
+            const deploy = async () => {
+                if (!auth.token || !auth.user || !htmlFile) {
+                    setError("Data belum lengkap bro!");
+                    return;
+                }
+                setLoading(true);
+                setError(null);
+
+                try {
+                    const repoName = `apk-build-${Date.now()}`;
+                    
+                    // 1. Bikin Repo
+                    const resRepo = await fetch('https://api.github.com/user/repos', {
+                        method: 'POST',
+                        headers: { 
+                            'Authorization': `token ${auth.token}`,
+                            'Content-Type': 'application/json' 
+                        },
+                        body: JSON.stringify({ name: repoName, auto_init: true })
+                    });
+                    if (!resRepo.ok) throw new Error("Gagal bikin repo. Cek Token!");
+                    const repoData = await resRepo.json();
+
+                    // 2. Upload index.html
+                    const htmlText = await htmlFile.text();
+                    await uploadToGithub(repoName, 'index.html', btoa(unescape(encodeURIComponent(htmlText))));
+
+                    // 3. Upload Icon (kalo ada)
+                    if (iconFile) {
+                        const reader = new FileReader();
+                        const iconB64 = await new Promise((resolve) => {
+                            reader.onload = () => resolve(reader.result.split(',')[1]);
+                            reader.readAsDataURL(iconFile);
+                        });
+                        await uploadToGithub(repoName, 'icon.png', iconB64);
+                    }
+
+                    // 4. Setup Workflow & Config.xml
+                    const configXml = `<?xml version='1.0' encoding='utf-8'?>
+<widget id="${appInfo.package}" version="1.0.0" xmlns="http://www.w3.org/ns/widgets">
+    <name>${appInfo.name}</name>
+    <content src="index.html" />
+    ${iconFile ? '<icon src="icon.png" />' : ''}
+</widget>`;
+                    
+                    await uploadToGithub(repoName, 'config.xml', btoa(configXml));
+
+                    const workflow = `name: Build APK
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { java-version: '17', distribution: 'temurin' }
+      - uses: android-actions/setup-android@v3
+      - name: Build
+        run: |
+          npm install -g cordova
+          cordova create myapp ${appInfo.package} "${appInfo.name}"
+          cd myapp
+          cordova platform add android
+          rm -rf www/*
+          cp ../index.html www/
+          cp ../config.xml .
+          ${iconFile ? 'cp ../icon.png .' : ''}
+          cordova build android --debug --device
+      - uses: actions/upload-artifact@v4
+        with: { name: APK, path: myapp/platforms/android/app/build/outputs/apk/debug/app-debug.apk }`;
+
+                    await uploadToGithub(repoName, '.github/workflows/main.yml', btoa(workflow));
+
+                    setRepoUrl(repoData.html_url);
+                    setStep(3);
+                } catch (e) { setError(e.message); }
+                setLoading(false);
+            };
+
+            const uploadToGithub = async (repo, path, content) => {
+                return fetch(`https://api.github.com/repos/${auth.user}/${repo}/contents/${path}`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `token ${auth.token}` },
+                    body: JSON.stringify({ message: `Upload ${path}`, content })
+                });
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4">
+                    <div className="w-full max-w-md glass rounded-3xl p-8 shadow-2xl">
+                        <div className="flex justify-between items-center mb-8">
+                            <h1 className="font-bold text-white text-sm uppercase tracking-widest">APK Automator v4</h1>
+                            <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
+                        </div>
+
+                        {step === 1 && (
+                            <div className="space-y-4">
+                                <label className="text-[10px] text-gray-500 font-bold uppercase">GitHub Access</label>
+                                <input type="text" value={auth.user} placeholder="Username" className="w-full bg-[#0d1117] border border-gray-800 p-3 rounded-xl outline-none focus:border-blue-500 transition" onChange={e => setAuth({...auth, user: e.target.value})} />
+                                <input type="password" value={auth.token} placeholder="Token (PAT)" className="w-full bg-[#0d1117] border border-gray-800 p-3 rounded-xl outline-none focus:border-blue-500 transition" onChange={e => setAuth({...auth, token: e.target.value})} />
+                                <button onClick={() => setStep(2)} className="w-full bg-blue-600 py-3 rounded-xl font-bold text-white mt-4 active:scale-95 transition">Next Step</button>
+                            </div>
+                        )}
+
+                        {step === 2 && (
+                            <div className="space-y-4">
+                                <input type="text" placeholder="Nama Aplikasi" className="w-full bg-[#0d1117] border border-gray-800 p-3 rounded-xl outline-none" onChange={e => setAppInfo({...appInfo, name: e.target.value})} />
+                                
+                                <div className="grid grid-cols-2 gap-2">
+                                    <label className="border-2 border-dashed border-gray-800 p-4 rounded-xl text-center cursor-pointer hover:border-blue-500 transition">
+                                        <input type="file" accept=".html" className="hidden" onChange={e => handleFile(e, setHtmlFile)} />
+                                        <p className="text-[10px] uppercase font-bold text-gray-500">{htmlFile ? "HTML OK" : "Upload HTML"}</p>
+                                    </label>
+                                    <label className="border-2 border-dashed border-gray-800 p-4 rounded-xl text-center cursor-pointer hover:border-green-500 transition">
+                                        <input type="file" accept="image/*" className="hidden" onChange={e => handleFile(e, setIconFile)} />
+                                        <p className="text-[10px] uppercase font-bold text-gray-500">{iconFile ? "Icon OK" : "Upload Icon"}</p>
+                                    </label>
+                                </div>
+
+                                {error && <p className="text-red-500 text-[10px] text-center">{error}</p>}
+                                <button onClick={deploy} disabled={loading} className="w-full bg-green-600 py-3 rounded-xl font-bold text-white flex justify-center items-center gap-2">
+                                    {loading && <div className="w-4 h-4 border-2 loader rounded-full"></div>}
+                                    {loading ? "DEPLOYING..." : "START BUILD"}
+                                </button>
+                                <button onClick={() => setStep(1)} className="w-full text-[10px] text-gray-600">Back to Config</button>
+                            </div>
+                        )}
+
+                        {step === 3 && (
+                            <div className="text-center space-y-6 py-4">
+                                <div className="text-4xl">🚀</div>
+                                <h3 className="font-bold text-white">Push Sukses!</h3>
+                                <p className="text-[10px] text-gray-500 leading-relaxed">Repositori dibuat & Ikon diupload. Sekarang GitHub Actions lagi proses build APK-nya.</p>
+                                <a href={`${repoUrl}/actions`} target="_blank" className="block w-full bg-white text-black py-3 rounded-xl font-bold">Cek Progres di GitHub</a>
+                                <button onClick={() => setStep(2)} className="text-[10px] text-blue-500 font-bold uppercase">Build Lagi</button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
+
